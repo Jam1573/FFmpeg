@@ -28,6 +28,7 @@
 *_g
 \#*
 .\#*
+.DS_Store
 /.config
 /.version
 /ffmpeg
@@ -41,3 +42,5 @@
 /src
 /mapfile
 /tools/python/__pycache__/
+.vscode
+build
