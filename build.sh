@@ -1,24 +1,30 @@
 ./configure --prefix=/usr/local/ffmpeg \
---enable-gpl \
---enable-version3 \
---enable-nonfree \
---enable-postproc \
---enable-libass \
---enable-libfdk-aac \
---enable-libfreetype \
---enable-libmp3lame \
---enable-libopencore-amrnb \
---enable-libopencore-amrwb \
---enable-libopenjpeg \
---enable-openssl \
---enable-libopus \
---enable-libspeex \
---enable-libtheora \
---enable-libvorbis \
---enable-libvpx \
---enable-libx264 \
---enable-libxvid \
---disable-static \
---enable-shared \
---enable-libx265
+    --disable-static \
+    --disable-doc \
+    --disable-htmlpages \
+    --disable-manpages \
+    --disable-podpages \
+    --disable-txtpages \
+    --enable-gpl \
+    --enable-version3 \
+    --enable-nonfree \
+    --enable-postproc \
+    --enable-libass \
+    --enable-libfdk-aac \
+    --enable-libfreetype \
+    --enable-libmp3lame \
+    --enable-libopenjpeg \
+    --enable-openssl \
+    --enable-libopus \
+    --enable-libspeex \
+    --enable-libtheora \
+    --enable-libvorbis \
+    --enable-libvpx \
+    --enable-libx264 \
+    --enable-libxvid \
+    --disable-static \
+    --enable-shared \
+    --enable-libx265 \
+    --enable-vaapi \
+    --enable-decoder=h264
 

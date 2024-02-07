@@ -279,7 +279,7 @@ int split_commandline(OptionParseContext *octx, int argc, char *argv[],
 void uninit_parse_context(OptionParseContext *octx);
 
 /**
- * Find the '-loglevel' option in the command line args and apply it.
+ * 解析 -loglevel 和 -hide_banner 参数，并完成相应的设置
  */
 void parse_loglevel(int argc, char **argv, const OptionDef *options);
 
