@@ -58,7 +58,8 @@
 
 AVDictionary *sws_dict;
 AVDictionary *swr_opts;
-AVDictionary *format_opts, *codec_opts;
+AVDictionary *codec_opts;
+AVDictionary *format_opts;
 
 int hide_banner = 0;
 
@@ -66,8 +67,8 @@ void uninit_opts(void)
 {
   av_dict_free(&swr_opts);
   av_dict_free(&sws_dict);
-  av_dict_free(&format_opts);
   av_dict_free(&codec_opts);
+  av_dict_free(&format_opts);
 }
 
 void log_callback_help(void *ptr, int level, const char *fmt, va_list vl)

@@ -345,7 +345,7 @@ static const char **vfilters_list = NULL;         // [cmd-arg] 视频 filters
 static int nb_vfilters = 0;
 static char *afilters = NULL;     // [cmd-arg] 音频 filters
 static int autorotate = 1;        // [cmd-arg] 自动旋转
-static int find_stream_info = 1;  // [cmd-arg] 读取并解码流，用启发式填充缺失的信息
+static int find_stream_info = 1;  // [cmd-arg] 读取并解码流，用启发式填充缺失的信息。默认为1
 static int filter_nbthreads = 0;  // [cmd-arg] 每个 graph 的过滤器线程数
 static int is_full_screen;        // [cmd-arg] 全屏
 static int dummy;                 // [cmd-arg] 读取指定文件
@@ -2813,17 +2813,26 @@ static int read_thread(void *arg)
   }
   ic->interrupt_callback.callback = decode_interrupt_cb;
   ic->interrupt_callback.opaque = is;
+
+  /**
+   * 查询并处理 scan_all_pmts 选项。 如果 scan_all_pmts 选项未设置，则设置为 1
+   * "scan_all_pmts" 是 FFmpeg 中的一个选项，用于控制是否扫描所有的 Program Map Tables (PMTs)。
+   * PMTs 是 MPEG-2 传输流中的一种数据表，用于存储每个频道的程序信息，包括每个程序的元数据以及每个程序中的音频、视频和数据流的 PID（Packet ID）。
+   * 在一些情况下，一些流可能不会在 PAT（Program Association Table）中列出所有的 PMTs，或者 PMTs 可能会在流的传输过程中改变。
+   * 在这些情况下，设置 "scan_all_pmts" 选项为 "1" 可以让 FFmpeg 扫描所有的 PMTs，以确保能够正确地解析流。
+  */
   if (!av_dict_get(format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
     av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
     scan_all_pmts_set = 1;
   }
+
   err = avformat_open_input(&ic, is->filename, is->iformat, &format_opts);
   if (err < 0) {
     print_error(is->filename, err);
     ret = -1;
     goto fail;
   }
-  if (scan_all_pmts_set)
+  if (scan_all_pmts_set)  // 如果是有手动处理 scan_all_pmts 选项，在 avformat_open_input 之后需要还原回去。
     av_dict_set(&format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
 
   if ((t = av_dict_get(format_opts, "", NULL, AV_DICT_IGNORE_SUFFIX))) {
@@ -2842,8 +2851,7 @@ static int read_thread(void *arg)
 
     err = setup_find_stream_info_opts(ic, codec_opts, &opts);
     if (err < 0) {
-      av_log(NULL, AV_LOG_ERROR,
-             "Error setting up avformat_find_stream_info() options\n");
+      av_log(NULL, AV_LOG_ERROR, "Error setting up avformat_find_stream_info() options\n");
       ret = err;
       goto fail;
     }
@@ -3147,12 +3155,15 @@ static VideoState *stream_open(const char *filename,
   init_clock(&is->audclk, &is->audioq.serial);
   init_clock(&is->extclk, &is->extclk.serial);
   is->audio_clock_serial = -1;
+
+  /* 音量归一化 */
   if (startup_volume < 0)
     av_log(NULL, AV_LOG_WARNING, "-volume=%d < 0, setting to 0\n", startup_volume);
   if (startup_volume > 100)
     av_log(NULL, AV_LOG_WARNING, "-volume=%d > 100, setting to 100\n", startup_volume);
   startup_volume = av_clip(startup_volume, 0, 100);
   startup_volume = av_clip(SDL_MIX_MAXVOLUME * startup_volume / 100, 0, SDL_MIX_MAXVOLUME);
+
   is->audio_volume = startup_volume;
   is->muted = 0;
   is->av_sync_type = av_sync_type;
