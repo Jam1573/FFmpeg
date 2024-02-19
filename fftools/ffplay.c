@@ -172,6 +172,7 @@ enum {
   AV_SYNC_EXTERNAL_CLOCK,  // 音视频同步于外部时钟
 };
 
+/* 解码管理器 */
 typedef struct Decoder {
   AVPacket *pkt;               // 包数据
   PacketQueue *queue;          // 包队列
@@ -187,6 +188,7 @@ typedef struct Decoder {
   SDL_Thread *decoder_tid;     // 解码线程
 } Decoder;
 
+/* 全局管理器 */
 typedef struct VideoState {
   SDL_Thread *read_tid;          // 解复用线程
   const AVInputFormat *iformat;  // 输入源格式
@@ -555,11 +557,19 @@ static int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, S
   return 0;
 }
 
+/**
+ * @brief 解码函数 解码音频、视频、字幕数据
+ * @param [in] d 解码管理器
+ * @param [out] frame 音视频解码数据
+ * @param [out] sub 字幕解码数据
+ * @return 1 表成功; 0 表文件结束; -1 表失败
+ */
 static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)
 {
   int ret = AVERROR(EAGAIN);
 
   for (;;) {
+    /* receive 解码数据帧 */
     if (d->queue->serial == d->pkt_serial) {
       do {
         if (d->queue->abort_request)
@@ -601,36 +611,40 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)
       } while (ret != AVERROR(EAGAIN));
     }
 
+    /* 从 PacketQueue 中读取带解码数据包 */
     do {
-      if (d->queue->nb_packets == 0)
+      if (d->queue->nb_packets == 0)  // 如果队列为空，唤醒 read_thread 线程解封装
         SDL_CondSignal(d->empty_queue_cond);
+
       if (d->packet_pending) {
         d->packet_pending = 0;
       } else {
         int old_serial = d->pkt_serial;
-        if (packet_queue_get(d->queue, d->pkt, 1, &d->pkt_serial) < 0)
+        if (packet_queue_get(d->queue, d->pkt, 1, &d->pkt_serial) < 0)  // 读取数据
           return -1;
-        if (old_serial != d->pkt_serial) {
+        if (old_serial != d->pkt_serial) {  // 如果序列发生变化，则清空解码器缓存
           avcodec_flush_buffers(d->avctx);
           d->finished = 0;
           d->next_pts = d->start_pts;
           d->next_pts_tb = d->start_pts_tb;
         }
       }
+
+      /* 序列号判定。如果读取的包序列号一致，则退出循环去send。如果序列号不一致，则 unref 数据 */
       if (d->queue->serial == d->pkt_serial)
         break;
       av_packet_unref(d->pkt);
     } while (1);
 
+    /* send 待解码数据包 */
     if (d->avctx->codec_type == AVMEDIA_TYPE_SUBTITLE) {
       int got_frame = 0;
       ret = avcodec_decode_subtitle2(d->avctx, sub, &got_frame, d->pkt);
       if (ret < 0) {
         ret = AVERROR(EAGAIN);
       } else {
-        if (got_frame && !d->pkt->data) {
+        if (got_frame && !d->pkt->data)
           d->packet_pending = 1;
-        }
         ret = got_frame ? 0 : (d->pkt->data ? AVERROR(EAGAIN) : AVERROR_EOF);
       }
       av_packet_unref(d->pkt);
@@ -645,6 +659,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)
         fd->pkt_pos = d->pkt->pos;
       }
 
+      /* 发送 AVPacket。如果发送失败，把 pkt 缓存起来，下次继续发送。 */
       if (avcodec_send_packet(d->avctx, d->pkt) == AVERROR(EAGAIN)) {
         av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
         d->packet_pending = 1;
@@ -2036,10 +2051,21 @@ end:
   return ret;
 }
 
+static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg)
+{
+  packet_queue_start(d->queue);
+  d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
+  if (!d->decoder_tid) {
+    av_log(NULL, AV_LOG_ERROR, "SDL_CreateThread(): %s\n", SDL_GetError());
+    return AVERROR(ENOMEM);
+  }
+  return 0;
+}
+
 /* 音频解码线程：从音频 packet_queue 中取数据，解码后放入音频 frame_queue */
 static int audio_thread(void *arg)
 {
-  VideoState *is = arg;
+  VideoState *vs = arg;
   AVFrame *frame = av_frame_alloc();
   Frame *af;
   int last_serial = -1;
@@ -2052,78 +2078,68 @@ static int audio_thread(void *arg)
     return AVERROR(ENOMEM);
 
   do {
-    if ((got_frame = decoder_decode_frame(&is->auddec, frame, NULL)) < 0)
+    if ((got_frame = decoder_decode_frame(&vs->auddec, frame, NULL)) < 0) // 音频解码
       goto the_end;
 
     if (got_frame) {
       tb = (AVRational){1, frame->sample_rate};
 
       reconfigure =
-          cmp_audio_fmts(is->audio_filter_src.fmt, is->audio_filter_src.ch_layout.nb_channels,
-                         frame->format, frame->ch_layout.nb_channels) ||
-          av_channel_layout_compare(&is->audio_filter_src.ch_layout, &frame->ch_layout) ||
-          is->audio_filter_src.freq != frame->sample_rate ||
-          is->auddec.pkt_serial != last_serial;
+          cmp_audio_fmts(vs->audio_filter_src.fmt, vs->audio_filter_src.ch_layout.nb_channels, frame->format, frame->ch_layout.nb_channels) ||
+          av_channel_layout_compare(&vs->audio_filter_src.ch_layout, &frame->ch_layout) ||
+          vs->audio_filter_src.freq != frame->sample_rate ||
+          vs->auddec.pkt_serial != last_serial;
 
+      /* 判断音频数据是否和 filter 要求一致，不一致需要重新 configure_audio_filters */
       if (reconfigure) {
         char buf1[1024], buf2[1024];
-        av_channel_layout_describe(&is->audio_filter_src.ch_layout, buf1, sizeof(buf1));
+        av_channel_layout_describe(&vs->audio_filter_src.ch_layout, buf1, sizeof(buf1));
         av_channel_layout_describe(&frame->ch_layout, buf2, sizeof(buf2));
         av_log(NULL, AV_LOG_DEBUG,
                "Audio frame changed from rate:%d ch:%d fmt:%s layout:%s serial:%d to rate:%d ch:%d fmt:%s layout:%s serial:%d\n",
-               is->audio_filter_src.freq, is->audio_filter_src.ch_layout.nb_channels, av_get_sample_fmt_name(is->audio_filter_src.fmt), buf1, last_serial,
-               frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, is->auddec.pkt_serial);
+               vs->audio_filter_src.freq, vs->audio_filter_src.ch_layout.nb_channels, av_get_sample_fmt_name(vs->audio_filter_src.fmt), buf1, last_serial,
+               frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, vs->auddec.pkt_serial);
 
-        is->audio_filter_src.fmt = frame->format;
-        ret = av_channel_layout_copy(&is->audio_filter_src.ch_layout, &frame->ch_layout);
+        vs->audio_filter_src.fmt = frame->format;
+        ret = av_channel_layout_copy(&vs->audio_filter_src.ch_layout, &frame->ch_layout);
         if (ret < 0)
           goto the_end;
-        is->audio_filter_src.freq = frame->sample_rate;
-        last_serial = is->auddec.pkt_serial;
+        vs->audio_filter_src.freq = frame->sample_rate;
+        last_serial = vs->auddec.pkt_serial;
 
-        if ((ret = configure_audio_filters(is, afilters, 1)) < 0)
+        if ((ret = configure_audio_filters(vs, afilters, 1)) < 0)
           goto the_end;
       }
 
-      if ((ret = av_buffersrc_add_frame(is->in_audio_filter, frame)) < 0)
+      if ((ret = av_buffersrc_add_frame(vs->in_audio_filter, frame)) < 0)
         goto the_end;
 
-      while ((ret = av_buffersink_get_frame_flags(is->out_audio_filter, frame, 0)) >= 0) {
+      while ((ret = av_buffersink_get_frame_flags(vs->out_audio_filter, frame, 0)) >= 0) {
         FrameData *fd = frame->opaque_ref ? (FrameData *)frame->opaque_ref->data : NULL;
-        tb = av_buffersink_get_time_base(is->out_audio_filter);
-        if (!(af = frame_queue_peek_writable(&is->sampq)))
+        tb = av_buffersink_get_time_base(vs->out_audio_filter);
+        if (!(af = frame_queue_peek_writable(&vs->sampq)))
           goto the_end;
 
         af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
         af->pos = fd ? fd->pkt_pos : -1;
-        af->serial = is->auddec.pkt_serial;
+        af->serial = vs->auddec.pkt_serial;
         af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});  // 当前帧包含的(单个声道)采样数/采样率就是当前帧的播放时长
 
         av_frame_move_ref(af->frame, frame);  // 将frame数据拷入af->frame，af->frame指向音频frame队列尾部
-        frame_queue_push(&is->sampq);         // 更新音频frame队列大小及写指针
+        frame_queue_push(&vs->sampq);         // 更新音频frame队列大小及写指针
 
-        if (is->audioq.serial != is->auddec.pkt_serial)
+        if (vs->audioq.serial != vs->auddec.pkt_serial)
           break;
       }
       if (ret == AVERROR_EOF)
-        is->auddec.finished = is->auddec.pkt_serial;
+        vs->auddec.finished = vs->auddec.pkt_serial;
     }
   } while (ret >= 0 || ret == AVERROR(EAGAIN) || ret == AVERROR_EOF);
+
 the_end:
-  avfilter_graph_free(&is->agraph);
+  avfilter_graph_free(&vs->agraph);
   av_frame_free(&frame);
   return ret;
-}
-
-static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg)
-{
-  packet_queue_start(d->queue);
-  d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
-  if (!d->decoder_tid) {
-    av_log(NULL, AV_LOG_ERROR, "SDL_CreateThread(): %s\n", SDL_GetError());
-    return AVERROR(ENOMEM);
-  }
-  return 0;
 }
 
 /* 视频解码线程：从视频 packet_queue 中取数据，解码后放入视频 frame_queue */
@@ -2496,7 +2512,6 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
  * @brief 打开音频输出 / 音频播放；
  * @param [in] opaque  提供给回调函数的参数
  * @param [in] wanted_channel_layout 希望的通道布局
- * @param [in] wanted_nb_channels 希望的听到数
  * @param [in] wanted_sample_rate 希望的采样率
  * @param [out] audio_hw_params 存储成功打开后的 SDL支持的音频参数
  * @return 成功返回 播放区buf大小，失败返回 -1
@@ -2535,31 +2550,27 @@ static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int 
   wanted_spec.callback = sdl_audio_callback;
   wanted_spec.userdata = opaque;
   while (!(audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted_spec, &spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
-    av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n",
-           wanted_spec.channels, wanted_spec.freq, SDL_GetError());
+    av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n", wanted_spec.channels, wanted_spec.freq, SDL_GetError());
     wanted_spec.channels = next_nb_channels[FFMIN(7, wanted_spec.channels)];
     if (!wanted_spec.channels) {
       wanted_spec.freq = next_sample_rates[next_sample_rate_idx--];
       wanted_spec.channels = wanted_nb_channels;
       if (!wanted_spec.freq) {
-        av_log(NULL, AV_LOG_ERROR,
-               "No more combinations to try, audio open failed\n");
+        av_log(NULL, AV_LOG_ERROR, "No more combinations to try, audio open failed\n");
         return -1;
       }
     }
     av_channel_layout_default(wanted_channel_layout, wanted_spec.channels);
   }
   if (spec.format != AUDIO_S16SYS) {
-    av_log(NULL, AV_LOG_ERROR,
-           "SDL advised audio format %d is not supported!\n", spec.format);
+    av_log(NULL, AV_LOG_ERROR, "SDL advised audio format %d is not supported!\n", spec.format);
     return -1;
   }
   if (spec.channels != wanted_spec.channels) {
     av_channel_layout_uninit(wanted_channel_layout);
     av_channel_layout_default(wanted_channel_layout, spec.channels);
     if (wanted_channel_layout->order != AV_CHANNEL_ORDER_NATIVE) {
-      av_log(NULL, AV_LOG_ERROR,
-             "SDL advised channel count %d is not supported!\n", spec.channels);
+      av_log(NULL, AV_LOG_ERROR, "SDL advised channel count %d is not supported!\n", spec.channels);
       return -1;
     }
   }
