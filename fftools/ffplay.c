@@ -2358,8 +2358,8 @@ static int audio_decode_frame(VideoState *vs)
 
   do {
 #if defined(_WIN32)
-    while (frame_queue_nb_remaining(&is->sampq) == 0) {
-      if ((av_gettime_relative() - audio_callback_time) > 1000000LL * is->audio_hw_buf_size / is->audio_tgt.bytes_per_sec / 2)
+    while (frame_queue_nb_remaining(&vs->sampq) == 0) {
+      if ((av_gettime_relative() - audio_callback_time) > 1000000LL * vs->audio_hw_buf_size / vs->audio_tgt.bytes_per_sec / 2)
         return -1;
       av_usleep(1000);
     }
@@ -2446,9 +2446,9 @@ static int audio_decode_frame(VideoState *vs)
   {
     static double last_clock;
     printf("audio: delay=%0.3f clock=%0.3f clock0=%0.3f\n",
-           is->audio_clock - last_clock,
-           is->audio_clock, audio_clock0);
-    last_clock = is->audio_clock;
+           vs->audio_clock - last_clock,
+           vs->audio_clock, audio_clock0);
+    last_clock = vs->audio_clock;
   }
 #endif
   return resampled_data_size;
